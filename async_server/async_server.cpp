@@ -2,6 +2,8 @@
 
 using namespace fi;
 
+// TODO:
+// -add handshake timeout
 async_tcp_server::async_tcp_server( ) {
 #ifdef _WIN32
 	if ( WSAStartup( MAKEWORD( 2, 2 ), &wsa_data_ ) != 0 )
@@ -75,27 +77,15 @@ void async_tcp_server::stop( ) {
 
 		if ( on_stop_callback_ )
 			on_stop_callback_( this );
+
+		connected_clients_.clear( );
 	}
 }
 
 void async_tcp_server::disconnect_client( SOCKET who ) {
-	std::lock_guard guard1( client_mtx_ );
+	std::lock_guard guard( disconnect_mtx_ );
 
-	auto it = std::find_if( connected_clients_.begin( ), connected_clients_.end( ), [ &who ]( const SOCKET& s ) {
-		return s == who;
-	} );
-
-	if ( it == connected_clients_.end( ) )
-		return;
-
-	if ( on_disconnect_callback_ )
-		on_disconnect_callback_( this, who );
-
-	shutdown( who, SD_BOTH );
-	closesocket( who );
-
-	process_buffers_.erase( who );
-	connected_clients_.erase( it );
+	clients_to_disconnect_.push_back( who );
 }
 
 bool async_tcp_server::is_running( ) {
@@ -230,6 +220,32 @@ bool async_tcp_server::send_packet_internal( SOCKET to, void* const data, const 
 	return true;
 }
 
+void async_tcp_server::disconnect_marked_clients( ) {
+	std::lock_guard guard1( client_mtx_ );
+	std::lock_guard guard2( process_mtx_ );
+	std::lock_guard guard3( disconnect_mtx_ );
+
+	for ( auto client : clients_to_disconnect_ ) {
+		auto it = std::find_if( connected_clients_.begin( ), connected_clients_.end( ), [ &client ]( const SOCKET& s ) {
+			return s == client;
+		} );
+
+		if ( it == connected_clients_.end( ) )
+			return;
+
+		if ( on_disconnect_callback_ )
+			on_disconnect_callback_( this, client );
+
+		shutdown( client, SD_BOTH );
+		closesocket( client );
+
+		process_buffers_.erase( client );
+		connected_clients_.erase( it );
+	}
+
+	clients_to_disconnect_.clear( );
+}
+
 void async_tcp_server::accept_clients( ) {
 	while ( running_ ) {
 		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
@@ -261,6 +277,9 @@ void async_tcp_server::accept_clients( ) {
 void async_tcp_server::process_data( ) {
 	while ( running_ ) { // The server will only process data for as long as it's running
 		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+
+		// Disconnect all marked clients before we process any data
+		disconnect_marked_clients( );
 
 		std::lock_guard guard( process_mtx_ );
 

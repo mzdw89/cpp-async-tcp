@@ -76,15 +76,7 @@ namespace fi {
 		// Function for sending our packet
 		bool send_packet_internal( SOCKET to, void* const data, const packets::packet_length length );
 
-		// Handles disconnecting
-		enum class disconnect_reasons : std::uint8_t {
-			reason_handshake_fail = 0,
-			reason_error,
-			reason_stop,
-			reason_server_stop
-		};
-
-		void disconnect_internal( const disconnect_reasons reason );
+		void disconnect_marked_clients( );
 
 		// These functions are running in a thread
 		void accept_clients( );
@@ -99,7 +91,9 @@ namespace fi {
 
 		SOCKET server_socket_ = 0;
 
-		std::mutex client_mtx_ = { }, process_mtx_ = { }, send_mtx_ = { };
+		std::mutex client_mtx_ = { }, disconnect_mtx_ = { }, process_mtx_ = { }, send_mtx_ = { };
+
+		std::vector< SOCKET > clients_to_disconnect_ = { };
 
 		std::vector< SOCKET > connected_clients_ = { };
 		std::unordered_map< SOCKET, std::vector< std::uint8_t > > process_buffers_ = { };
