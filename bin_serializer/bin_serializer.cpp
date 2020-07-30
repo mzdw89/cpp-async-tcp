@@ -17,7 +17,7 @@ void binary_serializer::serialize( const std::vector< std::string >& item ) {
 void binary_serializer::deserialize( std::string& out_item ) {
 	auto length = read_from_buffer< std::uint32_t >( );
 	
-	out_item.resize( length + 1 /* Make space for the 0-limiter */ );
+	out_item.resize( length );
 	memcpy( out_item.data( ), serialized_buffer_.data( ) + deserialized_bytes_, length );
 	
 	deserialized_bytes_ += length;
