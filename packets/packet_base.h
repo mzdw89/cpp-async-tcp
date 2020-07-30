@@ -10,10 +10,10 @@
 
 namespace fi::packets {
 	enum flags {
-		fl_none				= ( 1 << 0 ),
-		fl_handshake_cl		= ( 1 << 1 ),
-		fl_handshake_sv		= ( 1 << 2 ),
-		fl_disconnect		= ( 1 << 3 )
+		fl_none				= 0,
+		fl_handshake_cl		= ( 1 << 0 ),
+		fl_handshake_sv		= ( 1 << 1 ),
+		fl_disconnect		= ( 1 << 2 )
 
 		// Put your custom packet flags here
 	};

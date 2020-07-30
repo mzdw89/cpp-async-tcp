@@ -4,6 +4,7 @@ using namespace fi;
 
 // TODO:
 // -add handshake timeout
+// -finish processing all packets before we exit thread( cba rn, but its ez.look @ client )
 async_tcp_server::async_tcp_server( ) {
 #ifdef _WIN32
 	if ( WSAStartup( MAKEWORD( 2, 2 ), &wsa_data_ ) != 0 )
@@ -70,22 +71,39 @@ void async_tcp_server::start( std::string_view port ) {
 
 void async_tcp_server::stop( ) {
 	if ( running_ ) {
+		running_ = false;
+
 		shutdown( server_socket_, SD_BOTH );
 		closesocket( server_socket_ );
 
-		running_ = false;
-
 		if ( on_stop_callback_ )
 			on_stop_callback_( this );
-
-		connected_clients_.clear( );
 	}
+
+	connected_clients_.clear( );
+	process_buffers_.clear( );
+	clients_to_disconnect_.clear( );
 }
 
 void async_tcp_server::disconnect_client( SOCKET who ) {
-	std::lock_guard guard( disconnect_mtx_ );
+	std::lock_guard guard1( client_mtx_ );
+	std::lock_guard guard2( process_mtx_ );
 
-	clients_to_disconnect_.push_back( who );
+	auto it = std::find_if( connected_clients_.begin( ), connected_clients_.end( ), [ &who ]( const SOCKET& s ) {
+		return s == who;
+	} );
+
+	if ( it == connected_clients_.end( ) )
+		return;
+
+	shutdown( who, SD_SEND );
+	closesocket( who );
+
+	process_buffers_.erase( who );
+	connected_clients_.erase( it );
+
+	if ( on_disconnect_callback_ )
+		on_disconnect_callback_( this, who );
 }
 
 bool async_tcp_server::is_running( ) {
@@ -220,32 +238,6 @@ bool async_tcp_server::send_packet_internal( SOCKET to, void* const data, const 
 	return true;
 }
 
-void async_tcp_server::disconnect_marked_clients( ) {
-	std::lock_guard guard1( client_mtx_ );
-	std::lock_guard guard2( process_mtx_ );
-	std::lock_guard guard3( disconnect_mtx_ );
-
-	for ( auto client : clients_to_disconnect_ ) {
-		auto it = std::find_if( connected_clients_.begin( ), connected_clients_.end( ), [ &client ]( const SOCKET& s ) {
-			return s == client;
-		} );
-
-		if ( it == connected_clients_.end( ) )
-			return;
-
-		if ( on_disconnect_callback_ )
-			on_disconnect_callback_( this, client );
-
-		shutdown( client, SD_BOTH );
-		closesocket( client );
-
-		process_buffers_.erase( client );
-		connected_clients_.erase( it );
-	}
-
-	clients_to_disconnect_.clear( );
-}
-
 void async_tcp_server::accept_clients( ) {
 	while ( running_ ) {
 		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
@@ -273,17 +265,15 @@ void async_tcp_server::accept_clients( ) {
 	}
 }
 
-// TODO: finish processing all packets before we exit thread (cba rn, but its ez. look @ client)
 void async_tcp_server::process_data( ) {
-	while ( running_ ) { // The server will only process data for as long as it's running
+	while ( running_ ) { // The server will only process data for as long as it's running (fixme)
 		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
 
-		// Disconnect all marked clients before we process any data
-		disconnect_marked_clients( );
+		std::lock_guard guard1( client_mtx_ );
+		std::lock_guard guard2( process_mtx_ );
 
-		std::lock_guard guard( process_mtx_ );
-
-		for ( auto& client : connected_clients_ ) {
+		for ( std::size_t i = 0; i < connected_clients_.size( ); i++ ) {
+			auto client = connected_clients_[ i ];
 			auto& process_buffer = process_buffers_[ client ];
 
 			if ( process_buffer.size( ) < sizeof( packets::header ) )
@@ -316,8 +306,10 @@ void async_tcp_server::process_data( ) {
 				callbacks_[ header->id ]( this, client, serializer );
 			}
 
-			// Erase the packet from our buffer
-			process_buffer.erase( process_buffer.begin( ), process_buffer.begin( ) + data_length + sizeof( packets::header ) );
+			// Erase the packet from our buffer (client might've disconnected during callback,
+			// therefore we need to check if the buffer still exists.
+			if ( process_buffers_.find( client ) != process_buffers_.end( ) )
+				process_buffer.erase( process_buffer.begin( ), process_buffer.begin( ) + data_length + sizeof( packets::header ) );
 		}
 	}
 }
@@ -329,7 +321,9 @@ void async_tcp_server::receive_data( ) {
 		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
 
 		std::lock_guard guard( client_mtx_ );
-		for ( auto& client : connected_clients_ ) {
+		for ( std::size_t i = 0; i < connected_clients_.size( ); i++ ) {
+			auto& client = connected_clients_[ i ];
+
 			// Check if we received any data from our client
 			// so we don't block the thread with recv
 			unsigned long available_to_read = 0;
@@ -359,4 +353,8 @@ void async_tcp_server::receive_data( ) {
 			}
 		}
 	}
+
+	// Disconnect all clients on shutdown
+	for ( auto& client : connected_clients_ )
+		disconnect_client( client );
 }

@@ -76,8 +76,6 @@ namespace fi {
 		// Function for sending our packet
 		bool send_packet_internal( SOCKET to, void* const data, const packets::packet_length length );
 
-		void disconnect_marked_clients( );
-
 		// These functions are running in a thread
 		void accept_clients( );
 		void process_data( );
@@ -90,8 +88,12 @@ namespace fi {
 		const std::uint32_t buffer_size_ = PACKET_BUFFER_SIZE;
 
 		SOCKET server_socket_ = 0;
+	
+		std::mutex send_mtx_ = { }, disconnect_mtx_ = { };
 
-		std::mutex client_mtx_ = { }, disconnect_mtx_ = { }, process_mtx_ = { }, send_mtx_ = { };
+		// These CAN be accessed in the same thread multiple times, therefore we 
+		// need to make these recursive.
+		std::recursive_mutex client_mtx_ = { }, process_mtx_ = { };
 
 		std::vector< SOCKET > clients_to_disconnect_ = { };
 

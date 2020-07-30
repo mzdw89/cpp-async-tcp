@@ -3,20 +3,17 @@
 int main( ) {
 	try {
 		fi::async_tcp_server server = { };
-		bool server_should_run = true;
 
 		// Setup all our callbacks before starting the server
 		server.register_connect_callback( [ ]( fi::async_tcp_server* const sv, SOCKET who ) {
 			printf( "Client with socket ID %i has connected.\n", who );
 		} );
 
-		server.register_disconnect_callback( [ &server_should_run ]( fi::async_tcp_server* const sv, SOCKET who ) {
+		server.register_disconnect_callback( [ ]( fi::async_tcp_server* const sv, SOCKET who ) {
 			printf( "Client with socket ID %i has disconnected.\n", who );
-
-			// Stop the server (do NOT call sv->stop( ) here, as that will result 
-			// in infinite recursion. ALWAYS stop the server in the same thread you
-			// started it in!)
-			server_should_run = false;
+			
+			// Stop the server as we're done communicating
+			sv->stop( );
 		} );
 
 		server.register_stop_callback( [ ]( fi::async_tcp_server* const sv ) {
@@ -43,12 +40,9 @@ int main( ) {
 		printf( "Server running on port 1337.\n" );
 
 		// Wait for our server to stop running
-		while ( server_should_run ) {
+		while ( server.is_running( ) ) {
 			std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
 		}
-
-		// Officialy stop the server
-		server.stop( );
 
 		return 0;
 	} catch ( const std::exception& e ) {
