@@ -29,18 +29,9 @@ void async_tcp_client::send_packet( packets::base_packet* const packet );
 `send_packet` is used to send a packet to the server. Upon failure, the connection will be closed. 
 An exception will be thrown if the pointer is invalid and you will be disconnected from the server.
 ```c++
-void async_tcp_client::register_callback( packets::packet_id packet_id, packet_callback_client_fn callback_fn );
+void async_tcp_client::register_callback( std::function< void( async_tcp_client* const, const packets::packet_id, packets::detail::binary_serializer& ) > callback_fn );
 ```
-`register_callback` is used to register a callback which will be called once a packet with the corresponding ID is received. If no callback is registered for a given ID, the packet is discarded.
-```c++
-void async_tcp_client::remove_callback( packets::packet_id packet_id );
-```
-`remove_callback` will remove a callback for a given packet ID.
-```c++
-void async_tcp_client::set_callback_map( const std::unordered_map< packets::packet_id, packet_callback_client_fn >&
-callback_map );
-```
-`set_callback_map` is useful for when you have a lot of callbacks to register. Please note that it will override all existing callbacks with the map provided.
+`register_callback` is used to register a callback which will be called once a packet is received. It must be set before connecting, otherwise an exception will be thrown.
 ```c++
 void async_tcp_client::register_disconnect_callback( std::function< void( async_tcp_client* const ) > callback_fn );
 ```
@@ -68,15 +59,7 @@ void async_tcp_server::send_packet( SOCKET to, packets::base_packet* packet );
 ```
 `send_packet` will send a packet to the given client. Upon failure, the client will be disconnected from the server.
 ```c++
-void async_tcp_server::register_callback( packets::packet_id packet_id, packet_callback_server_fn callback_fn );
-```
-Same as client.
-```c++
-void async_tcp_server::remove_callback( packets::packet_id packet_id );
-```
-Same as client.
-```c++
-void async_tcp_server::set_callback_map( const std::unordered_map< packets::packet_id, packet_callback_server_fn >& callback_map );
+void async_tcp_server::register_callback( std::function< void( async_tcp_server* const, const SOCKET, const packets::packet_id, packets::detail::binary_serializer& ) > callback_fn );
 ```
 Same as client.
 ```c++
