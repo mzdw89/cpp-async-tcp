@@ -13,7 +13,8 @@ namespace fi::packets {
 		fl_none				= 0,
 		fl_handshake_cl		= ( 1 << 0 ),
 		fl_handshake_sv		= ( 1 << 1 ),
-		fl_disconnect		= ( 1 << 2 )
+		fl_heartbeat		= ( 1 << 2 ),
+		fl_disconnect		= ( 1 << 3 )
 
 		// Put your custom packet flags here
 	};
@@ -21,7 +22,10 @@ namespace fi::packets {
 	enum ids {
 		id_none = 0,
 		id_handshake,
+		id_heartbeat,
 		id_disconnect,
+		
+		num_preset_ids,
 
 		// Put your custom packet IDs here
 		id_example

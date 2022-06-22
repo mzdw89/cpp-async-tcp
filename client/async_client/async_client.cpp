@@ -5,7 +5,7 @@ using namespace fi;
 async_tcp_client::async_tcp_client( ) {
 #ifdef _WIN32
 	if ( WSAStartup( MAKEWORD( 2, 2 ), &wsa_data_ ) != 0 )
-		throw std::exception( "async_tcp_client::connect: WSAStartup failed" );
+		throw exception( exception::reason_id::wsastartup_failure, "async_tcp_client::connect: WSAStartup failed" );
 #endif // _WIN32
 }
 
@@ -14,7 +14,7 @@ async_tcp_client::~async_tcp_client( ) {
 
 	if ( processing_thread_.joinable( ) )
 		processing_thread_.join( );
-	
+
 	if ( receiving_thread_.joinable( ) )
 		receiving_thread_.join( );
 
@@ -25,7 +25,11 @@ async_tcp_client::~async_tcp_client( ) {
 
 bool async_tcp_client::connect( std::string_view ip, std::string_view port ) {
 	if ( connected_ )
-		throw std::exception( "async_tcp_client::connect: attempted to connect while a connection was open" );
+		throw exception( exception::reason_id::already_connected, "async_tcp_client::connect: attempted to connect while a connection was open" );
+
+	// Confirm that we have a callback set
+	if ( !process_callback_ )
+		throw exception( exception::reason_id::no_callback, "async_tcp_client::connect: no processing callback set" );
 
 	addrinfo hints = { }, * result = nullptr;
 
@@ -34,18 +38,18 @@ bool async_tcp_client::connect( std::string_view ip, std::string_view port ) {
 	hints.ai_socktype = SOCK_STREAM;
 
 	if ( getaddrinfo( ip.data( ), port.data( ), &hints, &result ) != 0 )
-		throw std::exception( "async_tcp_client::connect: getaddrinfo error" );
+		throw exception( exception::reason_id::getaddrinfo_failure, "async_tcp_client::connect: getaddrinfo error" );
 
 	socket_ = ::socket( result->ai_family, result->ai_socktype, result->ai_protocol );
 
 	if ( socket_ == INVALID_SOCKET ) {
 		freeaddrinfo( result );
-		throw std::exception( "async_tcp_client::connect: failed to create socket" );
+		throw exception( exception::reason_id::socket_failure, "async_tcp_client::connect: failed to create socket" );
 	}
 
 	if ( ::connect( socket_, result->ai_addr, int( result->ai_addrlen ) ) == SOCKET_ERROR ) {
 		freeaddrinfo( result );
-		throw std::exception( "async_tcp_client::connect: error connecting" );
+		throw exception( exception::reason_id::connection_error, "async_tcp_client::connect: error connecting" );
 	}
 
 	freeaddrinfo( result );
@@ -74,7 +78,7 @@ bool async_tcp_client::is_connected( ) {
 
 void async_tcp_client::send_packet( packets::base_packet* const packet ) {
 	if ( !packet )
-		throw std::exception( "async_tcp_client::send_packet: packet was nullptr" );
+		throw exception( exception::reason_id::packet_nullptr, "async_tcp_client::send_packet: packet was nullptr" );
 
 	std::lock_guard guard( send_mtx_ );
 
@@ -87,10 +91,10 @@ void async_tcp_client::send_packet( packets::base_packet* const packet ) {
 	std::vector< std::uint8_t > packet_data( sizeof( packets::header ) + serializer.get_serialized_data_length( ) );
 
 	// Construct our packet header
-	packets::header packet_header = construct_packet_header( 
-		serializer.get_serialized_data_length( ), 
-		packet->get_id( ), 
-		packets::flags::fl_none 
+	packets::header packet_header = construct_packet_header(
+		serializer.get_serialized_data_length( ),
+		packet->get_id( ),
+		packets::flags::fl_none
 	);
 
 	// Write our packet into the buffer
@@ -107,19 +111,11 @@ void async_tcp_client::send_packet( packets::base_packet* const packet ) {
 		disconnect_internal( disconnect_reasons::reason_error );
 }
 
-void async_tcp_client::register_callback( packets::packet_id packet_id, packet_callback_client_fn callback_fn ) {
+void async_tcp_client::register_callback( std::function< void( async_tcp_client* const, const packets::packet_id, packets::detail::binary_serializer& ) > callback_fn ) {
 	if ( !callback_fn )
-		throw std::exception( "async_tcp_client::register_callback: no callback given" );
+		throw exception( exception::reason_id::null_callback, "async_tcp_client::register_callback: no callback given" );
 
-	callbacks_[ packet_id ] = callback_fn;
-}
-
-void async_tcp_client::remove_callback( packets::packet_id packet_id ) {
-	callbacks_.erase( packet_id );
-}
-
-void async_tcp_client::set_callback_map( const std::unordered_map< packets::packet_id, packet_callback_client_fn >& callback_map ) {
-	callbacks_ = callback_map;
+	process_callback_ = callback_fn;
 }
 
 void async_tcp_client::register_disconnect_callback( std::function< void( async_tcp_client* const ) > callback_fn ) {
@@ -258,18 +254,16 @@ void async_tcp_client::process_data( ) {
 		// We have received a full packet
 		if ( process_buffer_.size( ) < header->length )
 			continue;
-	
+
+		auto data_start = process_buffer_.data( ) + sizeof( packets::header );
 		std::uint32_t data_length = header->length - sizeof( packets::header );
-		
-		// Check if we have a callback available
-		if ( callbacks_.find( header->id ) != callbacks_.end( ) ) {
-			auto data_start = process_buffer_.data( ) + sizeof( packets::header );
 
-			// Assign the data to our serializer
-			serializer.assign_buffer( data_start, data_length );
+		// Assign the data to our serializer
+		serializer.assign_buffer( data_start, data_length );
 
-			callbacks_[ header->id ]( this, serializer );
-		}
+		// Call our callback (it cannot be null)
+		if ( header->id > packets::ids::num_preset_ids )
+			process_callback_( this, header->id, serializer );
 
 		// Erase the packet from our buffer
 		process_buffer_.erase( process_buffer_.begin( ), process_buffer_.begin( ) + data_length + sizeof( packets::header ) );
@@ -297,6 +291,6 @@ void async_tcp_client::receive_data( ) {
 				process_buffer_.insert( process_buffer_.end( ), buffer.begin( ), buffer.begin( ) + bytes_received );
 		}
 
-		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );	
+		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
 	}
 }

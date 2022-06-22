@@ -26,18 +26,18 @@
 #include <functional>
 #include <unordered_map>
 
-#include "../packets/packets.h"
+#include "../../shared/packets/packets.h"
 
 // TODO: 
 // -add handshake timeout so we don't wait infinitely
+// -check if connected_ needs a mutex
+// -fix the stupid lag on handshake (why tf does it happen???)
 
 namespace fi {
 	class async_tcp_client {
 	public:
 		async_tcp_client( );
 		~async_tcp_client( );
-
-		typedef std::function< void( async_tcp_client* const, packets::detail::binary_serializer& ) > packet_callback_client_fn;
 
 		bool connect( std::string_view ip, std::string_view port );
 		void disconnect( );
@@ -46,16 +46,10 @@ namespace fi {
 
 		void send_packet( packets::base_packet* const packet );
 
-		// The callback will be called once a packet with the corresponding ID is received.
-		// You should always register your callbacks before you connect to the server, as 
-		// doing so after you connected may result in packets being lost.
-		void register_callback( packets::packet_id packet_id, packet_callback_client_fn callback_fn );
-		void remove_callback( packets::packet_id packet_id );
-
-		// If you have a lot of callbacks, it may be inefficient to call register_callback
-		// for each packet. You can predefine a map yourself and set it with this funciton.
-		// Please note that this will remove all existing callbacks.
-		void set_callback_map( const std::unordered_map< packets::packet_id, packet_callback_client_fn >& callback_map );
+		// The callback will be called once a packet is received.
+		// You must register your callback before you connect to
+		// the server, as not doing so will result in an exception.
+		void register_callback( std::function< void( async_tcp_client* const, const packets::packet_id, packets::detail::binary_serializer& ) > callback_fn );
 
 		// This function will be called as soon as the client disconnects or has been disconnected from the server.
 		void register_disconnect_callback( std::function< void( async_tcp_client* const ) > callback_fn );
@@ -101,13 +95,42 @@ namespace fi {
 		std::vector< std::uint8_t > process_buffer_ = { };
 
 		std::function< void( async_tcp_client* const ) > on_disconnect_callback_ = { };
-
-		// Our list of packet callbacks
-		std::unordered_map< packets::packet_id, packet_callback_client_fn > callbacks_ = { };
+		std::function< void( async_tcp_client* const, const packets::packet_id, packets::detail::binary_serializer& ) > process_callback_ = { };
 
 		std::thread processing_thread_ = { }, receiving_thread_ = { };
 
 		// This will help us in serializing our packet data
 		packets::detail::binary_serializer serializer = { };
+
+	public:
+		class exception : public std::exception {
+		public:
+			enum reason_id : std::uint8_t {
+				none = 0,
+				wsastartup_failure,
+				already_connected,
+				getaddrinfo_failure,
+				socket_failure,
+				connection_error,
+				packet_nullptr,
+				null_callback,
+				no_callback
+
+			};
+
+			exception( reason_id reason, std::string_view what ) : reason_( reason ), what_( what ) { };
+
+			virtual const char* what( ) const noexcept {
+				return what_.data( );
+			}
+
+			const reason_id get_reason( ) {
+				return reason_;
+			}
+
+		private:
+			std::string what_ = { };
+			reason_id reason_ = reason_id::none;
+		};
 	};
 } // namespace fi

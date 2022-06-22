@@ -5,6 +5,8 @@
 
 #define ARITHMETIC_TYPE_ONLY typename std::enable_if< std::is_arithmetic< T >::value >::type* = nullptr
 
+// TODO: add endianness
+
 namespace fi::packets::detail {
 	class binary_serializer {
 	public:

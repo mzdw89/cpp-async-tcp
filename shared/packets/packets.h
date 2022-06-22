@@ -14,7 +14,7 @@
 	std::vector< base_types >
 	std::vector< std::string >
 
-	Any other combination should not be used.
+	Any other combination should not be used, unless you add it to binary_serializer.
 	Remember to use platform-independent types (base_types, cstdint.h)
 	to make sure everything works fine across different architectures.
 */

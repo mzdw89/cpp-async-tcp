@@ -25,15 +25,13 @@
 #include <mutex>
 #include <functional>
 
-#include "../packets/packets.h"
+#include "../../shared/packets/packets.h"
 
 namespace fi {
 	class async_tcp_server {
 	public:
 		async_tcp_server( );
 		~async_tcp_server( );
-
-		typedef std::function< void( async_tcp_server* const, const SOCKET, packets::detail::binary_serializer& ) > packet_callback_server_fn;
 
 		void start( std::string_view port );
 		void stop( );
@@ -44,16 +42,10 @@ namespace fi {
 
 		void send_packet( SOCKET to, packets::base_packet* packet );
 
-		// The callback will be called once a packet with the corresponding ID is received.
-		// You should always register your callbacks before you start the server, as doing
-		// so after may result in packets being lost.
-		void register_callback( packets::packet_id packet_id, packet_callback_server_fn callback_fn );
-		void remove_callback( packets::packet_id packet_id );
-
-		// If you have a lot of callbacks, it may be inefficient to call register_callback
-		// for each packet. You can predefine a map yourself and set it with this funciton.
-		// Please note that this will remove all existing callbacks.
-		void set_callback_map( const std::unordered_map< packets::packet_id, packet_callback_server_fn >& callback_map );
+		// The callback will be called once a packet is received. You must register
+		// your callback before you start the server, as not doing so will result
+		// in an exception.
+		void register_callback( std::function< void( async_tcp_server* const, const SOCKET, const packets::packet_id, packets::detail::binary_serializer& ) > callback_fn );
 
 		// This function will be called as soon as the server stops.
 		void register_stop_callback( std::function< void( async_tcp_server* const ) > callback_fn );
@@ -80,12 +72,16 @@ namespace fi {
 		void accept_clients( );
 		void process_data( );
 		void receive_data( );
+		void run_heartbeat( ); 
 
 		bool running_ = false;
 
 		// This specifies the buffer size when receiving data. 
 		// It does not affect the size of the processing queue.
 		const std::uint32_t buffer_size_ = PACKET_BUFFER_SIZE;
+
+		// The amount of time to wait between heartbeat packets
+		const std::chrono::duration< long long > heartbeat_interval_ = std::chrono::seconds( 5 );
 
 		SOCKET server_socket_ = 0;
 	
@@ -103,12 +99,43 @@ namespace fi {
 		std::function< void( async_tcp_server* const, const SOCKET ) > on_connect_callback = { }, on_disconnect_callback_ = { };
 		std::function< void( async_tcp_server* const ) > on_stop_callback_ = { };
 
-		// Our list of packet callbacks
-		std::unordered_map< packets::packet_id, packet_callback_server_fn > callbacks_ = { };
+		// Our main processing callback
+		std::function< void( async_tcp_server* const, const SOCKET, const packets::packet_id, packets::detail::binary_serializer& ) > process_callback_ = { };
 
-		std::thread accepting_thread_ = { }, processing_thread_ = { }, receiving_thread_ = { };
+		std::thread accepting_thread_ = { }, processing_thread_ = { }, receiving_thread_ = { }, heartbeat_thread_ { };
 
 		// This will help us in serializing our packet data
 		packets::detail::binary_serializer serializer = { };
+
+	public:
+		class exception : public std::exception {
+		public:
+			enum reason_id : std::uint8_t {
+				none = 0,
+				wsastartup_failure,
+				already_running,
+				getaddrinfo_failure,
+				socket_failure,
+				packet_nullptr,
+				null_callback,
+				no_callback,
+				bind_error,
+				listen_error
+			};
+
+			exception( reason_id reason, std::string_view what ) : reason_( reason ), what_( what ) { };
+
+			virtual const char* what( ) const noexcept {
+				return what_.data( );
+			}
+
+			const reason_id get_reason( ) {
+				return reason_;
+			}
+
+		private:
+			std::string what_ = { };
+			reason_id reason_ = reason_id::none;
+		};
 	};
 } // namespace fi

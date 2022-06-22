@@ -8,7 +8,7 @@ using namespace fi;
 async_tcp_server::async_tcp_server( ) {
 #ifdef _WIN32
 	if ( WSAStartup( MAKEWORD( 2, 2 ), &wsa_data_ ) != 0 )
-		throw std::exception( "async_tcp_server::async_tcp_server: WSAStartup failed" );
+		throw exception( exception::reason_id::wsastartup_failure, "async_tcp_server::async_tcp_server: WSAStartup failed" );
 #endif // _WIN32
 }
 
@@ -24,6 +24,9 @@ async_tcp_server::~async_tcp_server( ) {
 	if ( receiving_thread_.joinable( ) )
 		receiving_thread_.join( );
 
+	if ( heartbeat_thread_.joinable( ) )
+		heartbeat_thread_.join( );
+
 #ifdef _WIN32
 	WSACleanup( );
 #endif // _WIN32
@@ -31,9 +34,12 @@ async_tcp_server::~async_tcp_server( ) {
 
 void async_tcp_server::start( std::string_view port ) {
 	if ( running_ )
-		throw std::exception( "async_tcp_server::start: attempted to start server while it was running" );
+		throw exception( exception::reason_id::already_running, "async_tcp_server::start: attempted to start server while it was running" );
 
-	addrinfo hints = { }, *result = nullptr;
+	if ( !process_callback_ )
+		throw exception( exception::reason_id::no_callback, "async_tcp_server::start: no processing callback set" );
+
+	addrinfo hints = { }, * result = nullptr;
 
 	hints.ai_family = AF_INET;
 	hints.ai_flags = AI_PASSIVE;
@@ -41,23 +47,23 @@ void async_tcp_server::start( std::string_view port ) {
 	hints.ai_socktype = SOCK_STREAM;
 
 	if ( getaddrinfo( nullptr, port.data( ), &hints, &result ) != 0 )
-		throw std::exception( "async_tcp_server::start: getaddrinfo error" );
+		throw exception( exception::reason_id::getaddrinfo_failure, "async_tcp_server::start: getaddrinfo error" );
 
 	server_socket_ = ::socket( result->ai_family, result->ai_socktype, result->ai_protocol );
 
 	if ( server_socket_ == INVALID_SOCKET ) {
 		freeaddrinfo( result );
-		throw std::exception( "async_tcp_server::start: failed to create socket" );
+		throw exception( exception::reason_id::socket_failure, "async_tcp_server::start: failed to create socket" );
 	}
 
 	if ( bind( server_socket_, result->ai_addr, result->ai_addrlen ) == SOCKET_ERROR ) {
 		freeaddrinfo( result );
-		throw std::exception( "async_tcp_server::start: failed to bind socket" );
+		throw exception( exception::reason_id::bind_error, "async_tcp_server::start: failed to bind socket" );
 	}
 
 	if ( listen( server_socket_, SOMAXCONN ) == SOCKET_ERROR ) {
 		freeaddrinfo( result );
-		throw std::exception( "async_tcp_server::start: failed to listen on socket" );
+		throw exception( exception::reason_id::listen_error, "async_tcp_server::start: failed to listen on socket" );
 	}
 
 	freeaddrinfo( result );
@@ -67,6 +73,7 @@ void async_tcp_server::start( std::string_view port ) {
 	accepting_thread_ = std::thread( &async_tcp_server::accept_clients, this );
 	processing_thread_ = std::thread( &async_tcp_server::process_data, this );
 	receiving_thread_ = std::thread( &async_tcp_server::receive_data, this );
+	heartbeat_thread_ = std::thread( &async_tcp_server::run_heartbeat, this );
 }
 
 void async_tcp_server::stop( ) {
@@ -112,7 +119,7 @@ bool async_tcp_server::is_running( ) {
 
 void async_tcp_server::send_packet( SOCKET to, packets::base_packet* packet ) {
 	if ( !packet )
-		throw std::exception( "async_tcp_server::send_packet: packet was nullptr" );
+		throw exception( exception::reason_id::packet_nullptr, "async_tcp_server::send_packet: packet was nullptr" );
 
 	std::lock_guard guard( send_mtx_ );
 
@@ -145,19 +152,11 @@ void async_tcp_server::send_packet( SOCKET to, packets::base_packet* packet ) {
 		disconnect_client( to );
 }
 
-void async_tcp_server::register_callback( packets::packet_id packet_id, packet_callback_server_fn callback_fn ) {
+void async_tcp_server::register_callback( std::function< void( async_tcp_server* const, const SOCKET, const packets::packet_id, packets::detail::binary_serializer& ) > callback_fn ) {
 	if ( !callback_fn )
-		throw std::exception( "async_tcp_server::register_callback: no callback given" );
+		throw exception( exception::reason_id::null_callback, "async_tcp_server::register_callback: no callback given" );
 
-	callbacks_[ packet_id ] = callback_fn;
-}
-
-void async_tcp_server::remove_callback( packets::packet_id packet_id ) {
-	callbacks_.erase( packet_id );
-}
-
-void async_tcp_server::set_callback_map( const std::unordered_map< packets::packet_id, packet_callback_server_fn >& callback_map ) {
-	callbacks_ = callback_map;
+	process_callback_ = callback_fn;
 }
 
 void async_tcp_server::register_stop_callback( std::function< void( async_tcp_server* const ) > callback_fn ) {
@@ -222,11 +221,11 @@ bool async_tcp_server::perform_handshake( SOCKET with ) {
 bool async_tcp_server::send_packet_internal( SOCKET to, void* const data, const packets::packet_length length ) {
 	std::uint32_t bytes_sent = 0;
 	do {
-		int sent = send( 
-			to, 
-			reinterpret_cast< char* >( data ) + bytes_sent, 
-			length - bytes_sent, 
-			0 
+		int sent = send(
+			to,
+			reinterpret_cast< char* >( data ) + bytes_sent,
+			length - bytes_sent,
+			0
 		);
 
 		if ( sent <= 0 )
@@ -294,17 +293,15 @@ void async_tcp_server::process_data( ) {
 			if ( process_buffer.size( ) < header->length )
 				continue;
 
+			auto data_start = process_buffer.data( ) + sizeof( packets::header );
 			std::uint32_t data_length = header->length - sizeof( packets::header );
 
-			// Check if we have a callback available
-			if ( callbacks_.find( header->id ) != callbacks_.end( ) ) {
-				auto data_start = process_buffer.data( ) + sizeof( packets::header );
+			// Assign the data to our serializer
+			serializer.assign_buffer( data_start, data_length );
 
-				// Assign the data to our serializer
-				serializer.assign_buffer( data_start, data_length );
-
-				callbacks_[ header->id ]( this, client, serializer );
-			}
+			// Call the processing callback (it cannot be null)
+			if ( header->id > packets::ids::num_preset_ids )
+				process_callback_( this, client, header->id, serializer );
 
 			// Erase the packet from our buffer (client might've disconnected during callback,
 			// therefore we need to check if the buffer still exists.
@@ -335,7 +332,7 @@ void async_tcp_server::receive_data( ) {
 			int bytes_received = recv( client, reinterpret_cast< char* >( buffer.data( ) ), buffer_size_, 0 );
 
 			switch ( bytes_received ) {
-				case -1: 
+				case -1:
 					// Disconnect the client on error
 					// We don't disconnect him on code 0 as that
 					// implies the client closed the connection by
@@ -357,4 +354,30 @@ void async_tcp_server::receive_data( ) {
 	// Disconnect all clients on shutdown
 	for ( auto& client : connected_clients_ )
 		disconnect_client( client );
+}
+
+void async_tcp_server::run_heartbeat( ) {
+
+	auto next = std::chrono::high_resolution_clock::now( ) + heartbeat_interval_;
+	while ( running_ ) {
+		std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+
+		if ( std::chrono::high_resolution_clock::now( ) < next )
+			continue;
+
+		std::lock_guard client_guard( client_mtx_ );
+		for ( auto it = connected_clients_.begin( ); it != connected_clients_.end( ); ) {
+			auto& client = *it;
+
+			auto header = construct_packet_header( 0, packets::ids::id_heartbeat, packets::flags::fl_heartbeat );
+
+			// If we failed to send the packet, something is wrong. Disconnect the client
+			if ( !send_packet_internal( client, &header, sizeof( header ) ) )
+				disconnect_client( client );
+			else
+				it++;
+		}
+
+		auto next = std::chrono::high_resolution_clock::now( ) + heartbeat_interval_;
+	}
 }
